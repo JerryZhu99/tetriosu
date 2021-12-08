@@ -67,7 +67,7 @@ ${hitObjects}
 }
 
 
-const pressKeys = ['rotateCW', 'rotateCCW', 'rotate180', 'hold', 'hardDrop']
+const defaultReleaseKeys = ['moveLeft', 'softDrop', 'moveRight']
 
 const defaultMapping = [
   'rotate180', 'hold', 'rotateCCW', 'rotateCW', 'hardDrop', 'moveLeft', 'softDrop', 'moveRight'
@@ -75,17 +75,63 @@ const defaultMapping = [
 
 const defaultOptions = {
   offset: 0,
+  playerIndex: 0,
+  roundIndex: 0,
 }
 
-const getInputs = events => events
+const getInputs = (events, offset = 0) => events
   .filter(e => ['keydown', 'keyup'].includes(e.type))
   .map(e => ({
     type: e.type,
-    time: (e.frame + e.data.subframe) * 1000 / 60.0,
+    time: (e.frame + e.data.subframe) * 1000 / 60.0 + offset,
     key: e.data.key,
   }))
 
-const convertTtr = (ttrData, mapping = defaultMapping, options = defaultOptions) => {
+const convertInputs = (inputs, mapping, releaseKeys, offset) => {
+  const keysHeld = new Map();
+  const notes = [];
+
+  inputs.forEach(({ type, time, key }) => {
+    if (!mapping.includes(key)) return;
+
+    if (type === 'keydown') {
+      const note = {
+        time,
+        lane: mapping.indexOf(key),
+      };
+      notes.push(note);
+      keysHeld.set(key, note);
+    } else if (releaseKeys.includes(key)) {
+      const note = keysHeld.get(key);
+      note.isHold = true;
+      note.endTime = time;
+    }
+  });
+
+  const keyCount = mapping.length;
+
+  const hitObjects = notes.map(note => {
+    const x = Math.round((note.lane + 0.5) * 512 / keyCount);
+    const y = 192;
+    const time = Math.floor(note.time);
+    const type = note.isHold ? 128 : 1;
+    const hitSound = 0;
+    const endTime = Math.floor(note.endTime);
+    const hitSample = '0:0:0:0:';
+
+    return [x, y, time, type, hitSound,
+      note.isHold ? `${endTime}:${hitSample}` : hitSample].join(',');
+  }).join('\n');
+
+  return hitObjects;
+}
+
+const convertTtr = (
+  ttrData,
+  mapping = defaultMapping,
+  releaseKeys = defaultReleaseKeys,
+  options = defaultOptions
+) => {
   const { user, endcontext, gametype, data } = ttrData;
   const { username } = user;
   const { score, finalTime } = endcontext;
@@ -100,59 +146,44 @@ const convertTtr = (ttrData, mapping = defaultMapping, options = defaultOptions)
 
   const artist = username.toUpperCase();
   const version = gametype === 'blitz' ? score : `${(finalTime / 1000.0).toFixed(3)}s`
-
-  const keysHeld = new Array(mapping.length).fill(null);
-  const notes = [];
-
-  const inputs = getInputs(data.events);
-  inputs.forEach(({ type, time, key }) => {
-    if (!mapping.includes(key)) return;
-
-    if (pressKeys.includes(key)) {
-      if (type === 'keydown') {
-        notes.push({
-          time,
-          lane: mapping.indexOf(key),
-        });
-      }
-    } else {
-      if (type === 'keydown') {
-        keysHeld[key] = time;
-      } else {
-        notes.push({
-          time: keysHeld[key],
-          endTime: time,
-          lane: mapping.indexOf(key),
-          isHold: true,
-        });
-        keysHeld[key] = null;
-      }
-    }
-  });
-
-  keysHeld.forEach((time, key) => {
-    if (time) {
-      notes.push({
-        time,
-        lane: mapping.indexOf(key),
-      });
-    }
-  })
-
   const keyCount = mapping.length;
 
-  const hitObjects = notes.map(note => {
-    const x = Math.round((note.lane + 0.5) * 512 / keyCount);
-    const y = 192;
-    const time = Math.floor(note.time) + offset;
-    const type = note.isHold ? 128 : 1;
-    const hitSound = 0;
-    const endTime = Math.floor(note.endTime) + offset;
-    const hitSample = '0:0:0:0:';
+  const inputs = getInputs(data.events, offset);
+  const hitObjects = convertInputs(inputs, mapping, releaseKeys, offset);
 
-    return [x, y, time, type, hitSound,
-      note.isHold ? `${endTime}:${hitSample}` : hitSample].join(',');
-  }).join('\n');
+  return maniaTemplate({
+    title, artist, version, keyCount, hitObjects
+  });
+}
+
+const convertTtrm = (
+  ttrmData,
+  mapping = defaultMapping,
+  releaseKeys = defaultReleaseKeys,
+  options = defaultOptions,
+) => {
+  const { endcontext, gametype, data } = ttrmData;
+  const { offset, roundIndex, playerIndex } = options;
+
+  const user = endcontext[playerIndex];
+  const username = user.user.username.toUpperCase();
+  const user1 = endcontext[0].user.username.toUpperCase();
+  const user2 = endcontext[1].user.username.toUpperCase();
+
+  let title = '';
+  if (gametype === 'league') {
+    title = `TETRA LEAGUE - ${user1} vs. ${user2}`
+  } else {
+    title = `TETR.IO VERSUS - ${user1} vs. ${user2}`
+  }
+
+  const artist = username.toUpperCase();
+  const version = `${username.toUpperCase()} - Round ${roundIndex + 1}/${data.length}`
+  const keyCount = mapping.length;
+
+  const events = data[roundIndex].replays[playerIndex].events;
+  const inputs = getInputs(events, offset);
+  const hitObjects = convertInputs(inputs, mapping, releaseKeys, offset);
 
   return maniaTemplate({
     title, artist, version, keyCount, hitObjects
@@ -160,7 +191,8 @@ const convertTtr = (ttrData, mapping = defaultMapping, options = defaultOptions)
 }
 
 const fileInput = document.getElementById('file-input');
-const output = document.getElementById('output');
+const options = document.getElementById('options');
+const saveButton = document.getElementById('save-button');
 
 const readFile = async (file) => {
   return new Promise((resolve, reject) => {
@@ -172,6 +204,7 @@ const readFile = async (file) => {
 };
 
 const saveFile = (data, filename, type) => {
+  console.log(data)
   var file = new Blob([data]);
   const a = document.createElement("a");
   const url = URL.createObjectURL(file);
@@ -185,12 +218,105 @@ const saveFile = (data, filename, type) => {
   }, 0);
 }
 
-fileInput.addEventListener('change', async (event) => {
+
+const initOptions = () => {
+  const createKeyOption = (value, num) => {
+    return `
+<label class="col-sm-2 col-form-label">Key ${num + 1}</label>
+<div class="col-sm-5">
+  <select class="form-select" id="key-${num}-select">
+    <option value="" ${num === 0 ? 'selected' : ''}>None</option>
+    <option value="rotate180" ${num === 0 ? 'selected' : ''}>Rotate 180</option>
+    <option value="hold" ${num === 1 ? 'selected' : ''}>Hold</option>
+    <option value="rotateCCW" ${num === 2 ? 'selected' : ''}>Rotate CCW</option>
+    <option value="rotateCW" ${num === 3 ? 'selected' : ''}>Rotate CW</option>
+    <option value="hardDrop" ${num === 4 ? 'selected' : ''}>Hard Drop</option>
+    <option value="moveLeft" ${num === 5 ? 'selected' : ''}>Move Left</option>
+    <option value="softDrop" ${num === 6 ? 'selected' : ''}>Soft Drop</option>
+    <option value="moveRight" ${num === 7 ? 'selected' : ''}>Move Right</option>
+  </select>
+</div>
+<div class="col-sm-5">
+  <div class="form-check">
+    <input class="form-check-input" type="checkbox" id="key-${num}-release" ${defaultReleaseKeys.includes(value) ? 'checked' : ''}>
+    <label class="form-check-label" for="key-${num}-release">
+      Include Release
+    </label>
+  </div>
+</div>
+`
+  }
+
+  const html = defaultMapping.map(createKeyOption).join('')
+  options.innerHTML = html;
+}
+
+const roundSelect = document.getElementById('round-select');
+const playerSelect = document.getElementById('player-select');
+const offsetInput = document.getElementById('offset')
+
+initVersusOptions = async () => {
+  const file = fileInput.files[0];
+  if (file && file.name.endsWith('.ttrm')) {
+    const fileData = JSON.parse(await readFile(file));
+    const numRounds = fileData.data.length;
+    roundSelect.options.length = 0;
+    for (let i = 0; i < numRounds; i++) {
+      roundSelect.options[i] = new Option(i + 1, i);
+    }
+
+    const players = fileData.endcontext.map(e => e.user.username);
+    playerSelect.options.length = 0;
+    for (let i = 0; i < players.length; i++) {
+      playerSelect.options[i] = new Option(players[i], i);
+    }
+    roundSelect.disabled = false;
+    playerSelect.disabled = false;
+  } else {
+    roundSelect.options.length = 0;
+    playerSelect.options.length = 0;
+    roundSelect.options[0] = new Option('N/A', '');
+    playerSelect.options[0] = new Option('N/A', '');
+
+
+    roundSelect.disabled = true;
+    playerSelect.disabled = true;
+  }
+}
+
+initOptions();
+initVersusOptions();
+
+fileInput.addEventListener('change', () => {
+  initVersusOptions();
+})
+
+saveButton.addEventListener('click', async () => {
+  let mapping = []
+  let releaseKeys = [];
+  new Array(8).fill(0).map((e, i) => {
+    const selectElem = document.getElementById(`key-${i}-select`);
+    const checkElem = document.getElementById(`key-${i}-release`);
+    if (selectElem.value) mapping.push(selectElem.value);
+    if (checkElem.checked) releaseKeys.push(selectElem.value);
+  })
+
   const file = fileInput.files[0];
   const fileData = JSON.parse(await readFile(file));
-  const osuFile = convertTtr(fileData, defaultMapping);
 
-  output.value = osuFile;
+  const options = {
+    ...defaultOptions,
+    offset: parseInt(offsetInput.value),
+    roundIndex: parseInt(roundSelect.value),
+    playerIndex: parseInt(playerSelect.value),
+  }
+
+  let osuFile
+  if (file.name.endsWith('.ttrm')) {
+    osuFile = convertTtrm(fileData, mapping, releaseKeys, options);
+  } else {
+    osuFile = convertTtr(fileData, mapping, releaseKeys, options);
+  }
 
   const filename = file.name.split('.').slice(0, -1).join('.') + '.osu'
   saveFile(osuFile, filename);
